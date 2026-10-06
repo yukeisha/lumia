@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["lumia", "lumia-core", "lumia-macros", "lumia-openapi", "lumia-telemetry"]
