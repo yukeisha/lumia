@@ -2,5 +2,7 @@
 name = "lumia-core"
 version = "0.0.0"
 edition = "2024"
+description = "Batteries-included REST API framework for Rust."
+license = "MIT"
 
 [dependencies]
