@@ -1,3 +1,3 @@
 # lumia-core
 
-Batteries-included REST API framework for Rust.
+Fundamental abstractions and types for Lumia.

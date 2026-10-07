@@ -6,3 +6,13 @@ description = "Batteries-included REST API framework for Rust."
 license = "MIT"
 
 [dependencies]
+bytes = "1"
+form_urlencoded = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt", "sync"] }

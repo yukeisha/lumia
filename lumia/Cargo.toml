@@ -6,3 +6,10 @@ description = "Batteries-included REST API framework for Rust."
 license = "MIT"
 
 [dependencies]
+lumia-core = { path = "../lumia-core", version = "0.0.0" }
+lumia-macros = { path = "../lumia-macros", version = "0.0.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

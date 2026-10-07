@@ -5,4 +5,10 @@ edition = "2024"
 description = "Batteries-included REST API framework for Rust."
 license = "MIT"
 
+[lib]
+proc-macro = true
+
 [dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing", "printing"] }
