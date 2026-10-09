@@ -156,6 +156,7 @@ version = "0.0.0"
 dependencies = [
  "lumia-core",
  "lumia-macros",
+ "lumia-openapi",
  "serde",
  "serde_json",
  "tokio",
@@ -171,6 +172,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "lumia-openapi",
  "percent-encoding",
  "serde",
  "serde_json",
@@ -189,6 +191,10 @@ dependencies = [
 [[package]]
 name = "lumia-openapi"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "lumia-telemetry"

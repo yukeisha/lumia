@@ -1,12 +1,24 @@
-//! Attribute macros for Lumia.
+//! Attribute and derive macros for Lumia.
 //!
 //! The main entry point is [`route`], which turns an async function into a
-//! route that can be passed to `Server::route`.
+//! route that can be passed to `Server::route`. An optional `openapi` attribute
+//! describes the route for the generated OpenAPI document, and
+//! [`Schema`]/[`Response`] describe request and response bodies.
+
+mod metadata;
+mod response;
+mod schema;
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{Attribute, Error, Ident, ItemFn, LitStr, Token};
+use syn::{
+    Attribute, Error, FnArg, GenericArgument, Ident, ItemFn, LitStr, Meta, PathArguments, Token,
+    Type, parse_macro_input,
+};
+
+use metadata::{OpenApiMeta, OpenApiMetaBody};
 
 /// Declares an HTTP route.
 ///
@@ -42,6 +54,18 @@ use syn::{Attribute, Error, Ident, ItemFn, LitStr, Token};
 /// Paths support `{name}` (or `:name`) parameters and a trailing `*name`
 /// catch-all segment, both readable through `Context::param`.
 ///
+/// A handler may declare a typed body with `Context<T>`, in which case the
+/// body is deserialized as JSON before the handler runs and made available as
+/// `ctx.req`:
+///
+/// ```text
+/// #[route(POST "/todos")]
+/// async fn create(ctx: Context<CreateTodoRequest>) -> Response {
+///     let title = ctx.req.title;
+///     // ...
+/// }
+/// ```
+///
 /// The handler must be an `async fn` taking exactly one argument (a
 /// `Context`) and no generics.
 ///
@@ -68,7 +92,122 @@ pub fn route(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-fn expand(args: RouteArgs, function: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+/// Describes a route for the generated OpenAPI document.
+///
+/// Place it after `#[route(...)]` (the order used in the examples) or before
+/// it; either way the metadata is attached to the generated route.
+///
+/// ```text
+/// #[route(POST "/todos")]
+/// #[openapi(
+///     summary = "Create a new todo",
+///     tag = "Todo",
+///     request = CreateTodoRequest,
+///     responses = (CreateTodoResponse, ValidationErrorResponse),
+/// )]
+/// async fn create(ctx: Context<CreateTodoRequest>) -> Response {
+///     // ...
+/// }
+/// ```
+///
+/// Supported keys are `summary`, `description`, `tag` (repeatable), `tags`,
+/// `operation_id`, `deprecated`, `request` and `responses`.
+#[proc_macro_attribute]
+pub fn openapi(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = TokenStream2::from(args);
+    let item = TokenStream2::from(item);
+
+    match merge_into_route(&args, item.clone()) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Derives an OpenAPI JSON schema for a struct or enum.
+///
+/// Structs become object schemas and enums with unit variants become string
+/// enums. Field and variant names honour `#[serde(rename = "...")]` and
+/// `#[serde(rename_all = "...")]`; skipped items honour `#[serde(skip)]`.
+///
+/// ```text
+/// #[derive(Serialize, Schema)]
+/// struct CreateTodoRequest {
+///     title: String,
+///     description: Option<String>,
+/// }
+/// ```
+#[proc_macro_derive(Schema, attributes(schema, serde))]
+pub fn derive_schema(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    schema::schema_impl(&input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+/// Derives a response type: a builder, `IntoResponse` and OpenAPI metadata.
+///
+/// ```text
+/// #[derive(Serialize, Response)]
+/// #[response(status = 201, description = "Todo created")]
+/// struct CreateTodoResponse {
+///     title: String,
+///     description: String,
+/// }
+///
+/// CreateTodoResponse::builder()
+///     .title("Ship it")
+///     .build()
+///     .into_response();
+/// ```
+#[proc_macro_derive(Response, attributes(response, schema, serde))]
+pub fn derive_response(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    response::response_impl(&input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+fn merge_into_route(args: &TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
+    let Ok(mut function) = syn::parse2::<ItemFn>(item.clone()) else {
+        return Ok(item);
+    };
+
+    let Some(index) = function
+        .attrs
+        .iter()
+        .position(|attr| attr.path().is_ident("route"))
+    else {
+        // Used without `#[route]`; nothing to merge into.
+        return Ok(item);
+    };
+
+    let route_attr = function.attrs.remove(index);
+    let Meta::List(list) = route_attr.meta else {
+        return Err(Error::new_spanned(
+            route_attr,
+            "`#[route]` must be written as `#[route(METHOD \"/path\")]`",
+        ));
+    };
+    let route_args = list.tokens;
+    let combined = if route_args.is_empty() {
+        args.clone()
+    } else {
+        quote!(#route_args, #args)
+    };
+
+    let attrs = &function.attrs;
+    let vis = &function.vis;
+    let signature = &function.sig;
+    let block = &function.block;
+
+    Ok(quote! {
+        #[route(#combined)]
+        #(#attrs)*
+        #vis #signature #block
+    })
+}
+
+fn expand(args: RouteArgs, function: ItemFn) -> syn::Result<TokenStream2> {
     let span = function.sig.ident.span();
 
     if function.sig.asyncness.is_none() {
@@ -88,16 +227,42 @@ fn expand(args: RouteArgs, function: ItemFn) -> syn::Result<proc_macro2::TokenSt
         ));
     }
 
+    let mut function = function;
+    let mut attrs = std::mem::take(&mut function.attrs);
+    let attribute_meta = take_openapi_meta(&mut attrs)?;
+
+    let mut meta = args.meta.clone();
+    meta.merge(attribute_meta);
+
     let name = function.sig.ident.clone();
     let handler = Ident::new(&format!("__lumia_handler_{name}"), span);
     let method = args.method.variant();
+    let method_name = args.method.name();
     let path = args.path;
-    let attrs = &function.attrs;
-    let mirrored = mirror_attrs(attrs);
+    let mirrored = mirror_attrs(&attrs);
     let vis = &function.vis;
+    let payload = context_payload(&function.sig.inputs);
     let mut signature = function.sig.clone();
     signature.ident = handler.clone();
     let body = &function.block;
+
+    let call = match payload {
+        Some(payload) => quote! {
+            let __lumia_payload = match ctx.json::<#payload>() {
+                ::std::result::Result::Ok(payload) => payload,
+                ::std::result::Result::Err(error) => {
+                    return ::lumia::IntoResponse::into_response(error);
+                }
+            };
+            let ctx = ctx.map_req(__lumia_payload);
+            ::lumia::IntoResponse::into_response(#handler(ctx).await)
+        },
+        None => quote! {
+            ::lumia::IntoResponse::into_response(#handler(ctx).await)
+        },
+    };
+
+    let operation = build_operation(&meta, method_name, &path);
 
     Ok(quote! {
         #(#mirrored)*
@@ -118,9 +283,11 @@ fn expand(args: RouteArgs, function: ItemFn) -> syn::Result<proc_macro2::TokenSt
                 ctx: ::lumia::Context,
             ) -> ::lumia::BoxFuture<'static, ::lumia::Response> {
                 ::std::boxed::Box::pin(async move {
-                    ::lumia::IntoResponse::into_response(#handler(ctx).await)
+                    #call
                 })
             }
+
+            #operation
         }
 
         #(#attrs)*
@@ -128,6 +295,99 @@ fn expand(args: RouteArgs, function: ItemFn) -> syn::Result<proc_macro2::TokenSt
         #[allow(non_snake_case)]
         #signature #body
     })
+}
+
+fn build_operation(meta: &OpenApiMeta, method: &str, path: &LitStr) -> TokenStream2 {
+    if meta.is_empty() {
+        return TokenStream2::new();
+    }
+
+    let summary = optional_string(&meta.summary);
+    let description = optional_string(&meta.description);
+    let operation_id = optional_string(&meta.operation_id);
+    let tags = &meta.tags;
+    let deprecated = meta.deprecated;
+    let request = match &meta.request {
+        Some(ty) => quote! {
+            ::std::option::Option::Some(::lumia::openapi::RequestBody::json::<#ty>())
+        },
+        None => quote! { ::std::option::Option::None },
+    };
+    let responses = &meta.responses;
+
+    quote! {
+        fn operation(&self) -> ::std::option::Option<::lumia::openapi::Operation> {
+            ::std::option::Option::Some(::lumia::openapi::Operation {
+                method: ::std::string::String::from(#method),
+                path: ::std::string::String::from(#path),
+                summary: #summary,
+                description: #description,
+                operation_id: #operation_id,
+                tags: ::std::vec![
+                    #( ::std::string::String::from(#tags) ),*
+                ],
+                deprecated: #deprecated,
+                request: #request,
+                responses: ::std::vec![
+                    #( ::lumia::openapi::ResponseBody::of::<#responses>() ),*
+                ],
+            })
+        }
+    }
+}
+
+fn optional_string(value: &Option<String>) -> TokenStream2 {
+    match value {
+        Some(value) => quote! {
+            ::std::option::Option::Some(::std::string::String::from(#value))
+        },
+        None => quote! { ::std::option::Option::None },
+    }
+}
+
+/// The payload type of a `Context<T>` handler, or `None` for a plain context.
+fn context_payload(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) -> Option<Type> {
+    let FnArg::Typed(argument) = inputs.first()? else {
+        return None;
+    };
+    let Type::Path(path) = &*argument.ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Context" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    let GenericArgument::Type(payload) = arguments.args.first()? else {
+        return None;
+    };
+    if matches!(payload, Type::Tuple(tuple) if tuple.elems.is_empty()) {
+        return None;
+    }
+    Some(payload.clone())
+}
+
+/// Removes and parses `#[openapi(...)]` attributes from `attrs`.
+fn take_openapi_meta(attrs: &mut Vec<Attribute>) -> syn::Result<OpenApiMeta> {
+    let mut meta = OpenApiMeta::default();
+    let mut kept = Vec::new();
+
+    for attr in attrs.drain(..) {
+        if attr.path().is_ident("openapi") {
+            let Meta::List(list) = &attr.meta else {
+                return Err(Error::new_spanned(&attr, "expected `#[openapi(...)]`"));
+            };
+            let body = syn::parse2::<OpenApiMetaBody>(list.tokens.clone())?;
+            meta.merge(body.0);
+        } else {
+            kept.push(attr);
+        }
+    }
+
+    *attrs = kept;
+    Ok(meta)
 }
 
 /// Attributes that make sense on both the handler and the generated struct.
@@ -156,36 +416,44 @@ fn mirror_attrs(attrs: &[Attribute]) -> Vec<Attribute> {
 struct RouteArgs {
     method: Method,
     path: LitStr,
+    meta: OpenApiMeta,
 }
+
 impl Parse for RouteArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        if input.peek(LitStr) {
-            let path = input.parse()?;
-            finish(input)?;
-            return Ok(Self {
-                method: Method::Get,
-                path,
-            });
-        }
+        let (method, path) = if input.peek(LitStr) {
+            (Method::Get, input.parse::<LitStr>()?)
+        } else {
+            let ident: Ident = input.parse().map_err(|_| {
+                input.error("expected an HTTP method and a path, for example `#[route(GET \"/\")]`")
+            })?;
+            let method = Method::from_ident(&ident)?;
 
-        let ident: Ident = input.parse().map_err(|_| {
-            input.error("expected an HTTP method and a path, for example `#[route(GET \"/\")]`")
-        })?;
-        let method = Method::from_ident(&ident)?;
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
 
-        if input.peek(Token![,]) {
+            let path = input.parse::<LitStr>().map_err(|_| {
+                Error::new(
+                    ident.span(),
+                    "expected a path string literal, for example `#[route(GET \"/\")]`",
+                )
+            })?;
+            (method, path)
+        };
+
+        let mut meta = OpenApiMeta::default();
+        while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break;
+            }
+            meta.parse_entry(input)?;
         }
 
-        let path = input.parse::<LitStr>().map_err(|_| {
-            Error::new(
-                ident.span(),
-                "expected a path string literal, for example `#[route(GET \"/\")]`",
-            )
-        })?;
         finish(input)?;
 
-        Ok(Self { method, path })
+        Ok(Self { method, path, meta })
     }
 }
 
@@ -236,7 +504,11 @@ impl Method {
     }
 
     fn variant(&self) -> Ident {
-        let name = match self {
+        Ident::new(self.name(), proc_macro2::Span::call_site())
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
             Self::Get => "GET",
             Self::Post => "POST",
             Self::Put => "PUT",
@@ -246,8 +518,7 @@ impl Method {
             Self::Options => "OPTIONS",
             Self::Trace => "TRACE",
             Self::Connect => "CONNECT",
-        };
-        Ident::new(name, proc_macro2::Span::call_site())
+        }
     }
 }
 
@@ -256,7 +527,7 @@ mod tests {
     use super::*;
     use quote::quote;
 
-    fn mirror(input: proc_macro2::TokenStream) -> Vec<String> {
+    fn mirror(input: TokenStream2) -> Vec<String> {
         use syn::parse::Parser;
 
         let attrs = syn::Attribute::parse_outer.parse2(input).unwrap();
@@ -264,6 +535,14 @@ mod tests {
             .iter()
             .map(|attr| attr.path().get_ident().unwrap().to_string())
             .collect()
+    }
+
+    fn args(input: TokenStream2) -> RouteArgs {
+        syn::parse2::<RouteArgs>(input).unwrap()
+    }
+
+    fn function(input: TokenStream2) -> ItemFn {
+        syn::parse2::<ItemFn>(input).unwrap()
     }
 
     #[test]
@@ -289,23 +568,51 @@ mod tests {
 
     #[test]
     fn parses_method_and_path() {
-        let args = syn::parse2::<RouteArgs>(quote!(POST "/users")).unwrap();
-        assert!(matches!(args.method, Method::Post));
-        assert_eq!(args.path.value(), "/users");
+        let parsed = args(quote!(POST "/users"));
+        assert!(matches!(parsed.method, Method::Post));
+        assert_eq!(parsed.path.value(), "/users");
     }
 
     #[test]
     fn parses_comma_separated_and_lowercase_forms() {
-        let args = syn::parse2::<RouteArgs>(quote!(delete, "/users/{id}")).unwrap();
-        assert!(matches!(args.method, Method::Delete));
-        assert_eq!(args.path.value(), "/users/{id}");
+        let parsed = args(quote!(delete, "/users/{id}"));
+        assert!(matches!(parsed.method, Method::Delete));
+        assert_eq!(parsed.path.value(), "/users/{id}");
+    }
+
+    #[test]
+    fn parses_inline_openapi_metadata() {
+        let parsed = args(quote!(
+            POST "/todos",
+            summary = "Create a new todo",
+            tag = "Todo",
+            request = CreateTodoRequest,
+            responses = (CreateTodoResponse,)
+        ));
+
+        assert_eq!(parsed.meta.summary.as_deref(), Some("Create a new todo"));
+        assert_eq!(parsed.meta.tags, vec!["Todo".to_owned()]);
+        assert!(parsed.meta.request.is_some());
+        assert_eq!(parsed.meta.responses.len(), 1);
+    }
+
+    #[test]
+    fn parses_openapi_attribute_body() {
+        let body: OpenApiMetaBody = syn::parse2(quote!(
+            description = "A todo",
+            responses = (CreateTodoResponse, ValidationErrorResponse)
+        ))
+        .unwrap();
+
+        assert_eq!(body.0.description.as_deref(), Some("A todo"));
+        assert_eq!(body.0.responses.len(), 2);
     }
 
     #[test]
     fn defaults_to_get_when_only_a_path_is_given() {
-        let args = syn::parse2::<RouteArgs>(quote!("/health")).unwrap();
-        assert!(matches!(args.method, Method::Get));
-        assert_eq!(args.path.value(), "/health");
+        let parsed = args(quote!("/health"));
+        assert!(matches!(parsed.method, Method::Get));
+        assert_eq!(parsed.path.value(), "/health");
     }
 
     #[test]
@@ -337,19 +644,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unknown_openapi_keys() {
+        let error = syn::parse2::<RouteArgs>(quote!(GET "/", nope = "x"))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown openapi key"), "{error}");
+    }
+
+    #[test]
     fn rejects_non_async_handlers() {
-        let function = syn::parse2::<ItemFn>(quote!(
-            fn handler(ctx: Context) -> Response {
-                todo!()
-            }
-        ))
-        .unwrap();
         let error = expand(
-            RouteArgs {
-                method: Method::Get,
-                path: LitStr::new("/", proc_macro2::Span::call_site()),
-            },
-            function,
+            args(quote!(GET "/")),
+            function(quote!(
+                fn handler(ctx: Context) -> Response {
+                    todo!()
+                }
+            )),
         )
         .unwrap_err();
 
@@ -358,18 +668,13 @@ mod tests {
 
     #[test]
     fn rejects_handlers_without_a_single_argument() {
-        let function = syn::parse2::<ItemFn>(quote!(
-            async fn handler() -> Response {
-                todo!()
-            }
-        ))
-        .unwrap();
         let error = expand(
-            RouteArgs {
-                method: Method::Get,
-                path: LitStr::new("/", proc_macro2::Span::call_site()),
-            },
-            function,
+            args(quote!(GET "/")),
+            function(quote!(
+                async fn handler() -> Response {
+                    todo!()
+                }
+            )),
         )
         .unwrap_err();
 
@@ -377,5 +682,61 @@ mod tests {
             error.to_string().contains("exactly one argument"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn detects_typed_context_payloads() {
+        let function = function(quote!(
+            async fn handler(ctx: Context<CreateTodoRequest>) -> Response {
+                let _ = ctx.req;
+                todo!()
+            }
+        ));
+
+        let payload = context_payload(&function.sig.inputs).unwrap();
+        assert_eq!(quote!(#payload).to_string(), "CreateTodoRequest");
+    }
+
+    #[test]
+    fn plain_context_has_no_payload() {
+        let function = function(quote!(
+            async fn handler(ctx: Context) -> Response {
+                todo!()
+            }
+        ));
+
+        assert!(context_payload(&function.sig.inputs).is_none());
+    }
+
+    #[test]
+    fn generates_operation_when_metadata_is_present() {
+        let tokens = expand(
+            args(quote!(POST "/todos", summary = "Create", request = CreateTodoRequest)),
+            function(quote!(
+                async fn handler(ctx: Context) -> Response {
+                    todo!()
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+
+        assert!(tokens.contains("fn operation"), "{tokens}");
+    }
+
+    #[test]
+    fn skips_operation_without_metadata() {
+        let tokens = expand(
+            args(quote!(GET "/")),
+            function(quote!(
+                async fn handler(ctx: Context) -> Response {
+                    todo!()
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+
+        assert!(!tokens.contains("fn operation"), "{tokens}");
     }
 }

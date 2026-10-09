@@ -21,16 +21,33 @@ use crate::response::Response;
 ///     ctx.Json(serde_json::json!({ "id": id }))
 /// }
 /// ```
+///
+/// The type parameter carries a deserialized request body. Handlers that
+/// declare `Context<T>` receive it in the [`req`](Context::req) field:
+///
+/// ```text
+/// #[route(POST "/todos")]
+/// async fn create(ctx: Context<CreateTodoRequest>) -> Response {
+///     let title = ctx.req.title;
+///     // ...
+/// }
+/// ```
 #[derive(Debug, Clone)]
-pub struct Context {
+pub struct Context<T = ()> {
     request: Request,
+    /// The deserialized request body for a typed context.
+    ///
+    /// This is `()` for a plain `Context`.
+    pub req: T,
 }
 
-impl Context {
+impl Context<()> {
     pub(crate) fn new(request: Request) -> Self {
-        Self { request }
+        Self { request, req: () }
     }
+}
 
+impl<T> Context<T> {
     /// The underlying request.
     pub fn request(&self) -> &Request {
         &self.request
@@ -39,6 +56,22 @@ impl Context {
     /// Consumes the context, returning the underlying request.
     pub fn into_request(self) -> Request {
         self.request
+    }
+
+    /// Consumes the context, returning the deserialized body.
+    pub fn into_req(self) -> T {
+        self.req
+    }
+
+    /// Replaces the deserialized body, changing the context's type.
+    ///
+    /// Used by the `#[route]` macro to hand a typed context to handlers that
+    /// declare `Context<T>`.
+    pub fn map_req<U>(self, req: U) -> Context<U> {
+        Context {
+            request: self.request,
+            req,
+        }
     }
 
     /// The request method.
@@ -105,7 +138,7 @@ impl Context {
     }
 
     /// Deserializes the request body as JSON.
-    pub fn json<T: DeserializeOwned>(&self) -> Result<T> {
+    pub fn json<R: DeserializeOwned>(&self) -> Result<R> {
         serde_json::from_slice(self.request.body()).map_err(Error::from)
     }
 
@@ -114,7 +147,7 @@ impl Context {
     /// The capital `J` matches the syntax used by the Lumia examples
     /// (`ctx.Json(...)`).
     #[allow(non_snake_case)]
-    pub fn Json<T: Serialize>(&self, value: T) -> Response {
+    pub fn Json<R: Serialize>(&self, value: R) -> Response {
         Response::json(value)
     }
 

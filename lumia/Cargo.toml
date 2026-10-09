@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 lumia-core = { path = "../lumia-core", version = "0.0.0" }
 lumia-macros = { path = "../lumia-macros", version = "0.0.0" }
+lumia-openapi = { path = "../lumia-openapi", version = "0.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

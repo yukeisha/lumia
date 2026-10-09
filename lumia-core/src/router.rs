@@ -33,6 +33,15 @@ pub trait Route: Send + Sync + 'static {
 
     /// Invokes the handler.
     fn call(&self, ctx: Context) -> BoxFuture<'static, Response>;
+
+    /// OpenAPI metadata for this route, when it was declared.
+    ///
+    /// The `#[openapi(...)]` attribute on a handler makes the `#[route]` macro
+    /// implement this method; routes without the attribute return `None` and
+    /// are omitted from the generated document.
+    fn operation(&self) -> Option<lumia_openapi::Operation> {
+        None
+    }
 }
 
 /// The outcome of matching a request against the router.
@@ -130,6 +139,14 @@ impl Router {
     /// The number of registered routes.
     pub fn len(&self) -> usize {
         self.routes.len()
+    }
+
+    /// OpenAPI metadata for every route that declared it.
+    pub fn operations(&self) -> Vec<lumia_openapi::Operation> {
+        self.routes
+            .iter()
+            .filter_map(|route| route.route.operation())
+            .collect()
     }
 
     /// Returns `true` when no routes are registered.

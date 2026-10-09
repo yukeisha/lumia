@@ -165,6 +165,7 @@ version = "0.0.0"
 dependencies = [
  "lumia-core",
  "lumia-macros",
+ "lumia-openapi",
  "serde",
  "serde_json",
 ]
@@ -179,6 +180,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "lumia-openapi",
  "percent-encoding",
  "serde",
  "serde_json",
@@ -192,6 +194,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "lumia-openapi"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -209,6 +219,15 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys",
+]
+
+[[package]]
+name = "openapi"
+version = "0.1.0"
+dependencies = [
+ "lumia",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

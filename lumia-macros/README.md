@@ -41,3 +41,51 @@ generics.
 > The macro defines a unit struct named after the handler in the same scope, so
 > avoid binding a local variable with the exact name of a handler declared in
 > the same module.
+
+Handlers may declare a typed body with `Context<T>`; the JSON body is
+deserialized before the handler runs and exposed as `ctx.req`:
+
+```rust
+#[route(POST "/todos")]
+async fn create(ctx: Context<CreateTodoRequest>) -> Response {
+    ctx.Json(serde_json::json!({ "title": ctx.req.title }))
+}
+```
+
+## `#[openapi]`
+
+Describes a route for the generated OpenAPI document. It may be written after
+or before `#[route(...)]`.
+
+```rust
+#[route(POST "/todos")]
+#[openapi(
+    summary = "Create a new todo",
+    tag = "Todo",
+    request = CreateTodoRequest,
+    responses = (CreateTodoResponse, ValidationErrorResponse),
+)]
+async fn create(ctx: Context<CreateTodoRequest>) -> Response { /* ... */ }
+```
+
+Supported keys are `summary`, `description`, `tag` (repeatable), `tags`,
+`operation_id`, `deprecated`, `request` and `responses`.
+
+## `#[derive(Schema)]`
+
+Derives an OpenAPI JSON schema for a struct (object) or an enum with unit
+variants (string enum). Honours `#[serde(rename = "...")]`,
+`#[serde(rename_all = "...")]` and `#[serde(skip)]`.
+
+## `#[derive(Response)]`
+
+Derives a response type: a `builder()`, an `IntoResponse` implementation and
+`ApiResponse` metadata.
+
+```rust
+#[derive(Serialize, Response)]
+#[response(status = 201, description = "Todo created")]
+struct CreateTodoResponse {
+    title: String,
+}
+```

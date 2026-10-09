@@ -92,6 +92,25 @@ An `Error` is rendered as `{"error": "..."}` with the matching status code.
 | `ctx.text()`               | The body as UTF-8                              |
 | `ctx.json::<T>()`          | Deserialize the body as JSON                   |
 
+### Typed request bodies
+
+Declare `Context<T>` to have the JSON body deserialized for you. The value is
+available as `ctx.req`, and a malformed body produces a `400` before the
+handler runs:
+
+```rust
+#[derive(Deserialize, Schema)]
+struct CreateTodoRequest {
+    title: String,
+    description: String,
+}
+
+#[route(POST "/todos")]
+async fn create(ctx: Context<CreateTodoRequest>) -> Response {
+    ctx.Json(serde_json::json!({ "title": ctx.req.title }))
+}
+```
+
 ## Building a response
 
 `Context` offers `ctx.Json(value)`, `ctx.Text(text)` and `ctx.Html(markup)`,
@@ -102,6 +121,76 @@ Responses can be tweaked with `with_status` and `with_header`:
 Response::json(serde_json::json!({ "id": 7 }))
     .with_status(StatusCode::CREATED)
     .with_header("x-request-id", "abc")
+```
+
+`#[derive(Response)]` builds a response type for you: it generates a builder,
+an `IntoResponse` implementation and the OpenAPI response metadata.
+
+```rust
+#[derive(Serialize, Response)]
+#[response(status = 201, description = "Todo created")]
+struct CreateTodoResponse {
+    title: String,
+    description: String,
+}
+
+CreateTodoResponse::builder()
+    .title("Ship it")
+    .description("soon")
+    .build()
+    .into_response();
+```
+
+## OpenAPI
+
+Annotate a route with `#[openapi(...)]` to describe it, then point clients at
+`/openapi.json` or open `/docs` in a browser. The document is generated from the
+registered routes, so it always matches what the server actually serves, and
+`/docs` renders it with the [Scalar](https://github.com/scalar/scalar) API
+reference.
+
+```rust
+#[route(POST "/todos")]
+#[openapi(
+    summary = "Create a new todo",
+    description = "Create a new todo ...",
+    tag = "Todo",
+    request = CreateTodoRequest,
+    responses = (
+        CreateTodoResponse,
+        ValidationErrorResponse,
+        InternalErrorResponse
+    )
+)]
+async fn create(ctx: Context<CreateTodoRequest>) -> Response {
+    CreateTodoResponse::builder()
+        .title(ctx.req.title)
+        .description(ctx.req.description)
+        .status(ctx.req.status)
+        .build()
+        .into_response()
+}
+```
+
+The attribute supports `summary`, `description`, `tag` (repeatable), `tags`,
+`operation_id`, `deprecated`, `request` and `responses`. Request bodies use
+`#[derive(Schema)]`; response bodies use `#[derive(Response)]`. Built-in error
+responses include `ValidationErrorResponse` (`400`), `NotFoundErrorResponse`
+(`404`) and `InternalErrorResponse` (`500`).
+
+> Deriving `Serialize`/`Deserialize` resolves the `serde` crate by name, so add
+> `serde = { version = "1", features = ["derive"] }` to your `Cargo.toml` even
+> though Lumia re-exports the traits.
+
+Configure the document with `Server::openapi`, move it with
+`Server::openapi_path`, or turn it off with `Server::disable_openapi`. The
+Scalar reference moves with `Server::docs_path` and can be turned off on its own
+with `Server::disable_docs`:
+
+```rust
+Server::new()
+    .openapi(OpenApi::new("Todo API", "0.1.0"))
+    .route(create);
 ```
 
 ## Serving
@@ -120,8 +209,10 @@ tokio::spawn(server.serve(listener));
 
 | Crate             | Purpose                                            |
 | ----------------- | -------------------------------------------------- |
-| `lumia`           | Public façade: prelude, `Server`, `#[route]`.       |
+| `lumia`           | Public façade: prelude, `Server`, `#[route]`, derives. |
 | `lumia-core`      | Runtime: `Server`, `Router`, `Context`, `Response`. |
-| `lumia-macros`    | The `#[route]` attribute macro.                     |
-| `lumia-openapi`   | OpenAPI generation (planned).                       |
+| `lumia-macros`    | The `#[route]`, `#[openapi]`, `Schema` and `Response` macros. |
+| `lumia-openapi`   | OpenAPI 3.0 document generation.                    |
 | `lumia-telemetry` | Tracing and metrics (planned).                      |
+
+The OpenAPI example lives in [`examples/openapi`](../examples/openapi).

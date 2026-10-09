@@ -20,7 +20,7 @@ pub use error::{Error, Result};
 pub use request::Request;
 pub use response::{Html, IntoResponse, Json, Response, Text};
 pub use router::{BoxFuture, Route, RouteMatch, Router};
-pub use server::Server;
+pub use server::{OpenApiEndpoint, Server};
 
 pub use bytes::Bytes;
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
